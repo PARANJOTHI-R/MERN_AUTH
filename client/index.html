@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Glossera Auth App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary-blue': '#104990',
+                        'secondary-gray': '#E5E7EB',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+            min-height: 100vh;
+        }
+        .container-card {
+            box-shadow: 0 10px 25px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        .form-input {
+            border-color: #D1D5DB;
+        }
+        .btn-primary {
+            background-color: #104990;
+            transition: background-color 0.15s;
+        }
+        .btn-primary:hover {
+            background-color: #0b3463;
+        }
+        .message-box {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 100;
+            transform: translateX(100%);
+            transition: transform 0.5s ease-in-out;
+        }
+        .message-box.show {
+            transform: translateX(0);
+        }
+        .message-box.error {
+            background-color: #fee2e2;
+            color: #ef4444;
+            border-left: 4px solid #ef4444;
+        }
+        .message-box.success {
+            background-color: #d1fae5;
+            color: #10b981;
+            border-left: 4px solid #10b981;
+        }
+    </style>
+</head>
+<body class="flex items-center justify-center p-4">
+
+    <div id="app-container" class="w-full max-w-md bg-white p-8 rounded-xl container-card shadow-lg">
+        </div>
+
+    <div id="message-box" class="message-box p-4 rounded-lg shadow-xl" role="alert">
+        <p id="message-text" class="text-sm font-medium"></p>
+    </div>
+
+    <div id="loading-overlay" class="fixed inset-0 bg-gray-900 bg-opacity-50 z-50 flex items-center justify-center hidden">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div>
+    </div>
+
+    <script>
+        // The API base URL from your server.js, adjust if needed for deployment
+        const BASE_URL = 'http://localhost:4000/api';
+
+        // --- Core Application State and Logic ---
+        const App = {
+            authState: {
+                isLoggedIn: false,
+                currentView: 'login', // Initial view
+                userData: null,
+                tempEmail: null, // Used for password reset flow
+            },
+            
+            // --- Utility Functions ---
+
+            setLoading(isLoading) {
+                const overlay = document.getElementById('loading-overlay');
+                overlay.classList.toggle('hidden', !isLoading);
+            },
+
+            showMessage(message, isSuccess = false) {
+                const box = document.getElementById('message-box');
+                const text = document.getElementById('message-text');
+                
+                // Clear previous state
+                box.classList.remove('show', 'success', 'error');
+
+                text.textContent = message;
+                box.classList.add(isSuccess ? 'success' : 'error');
+                
+                // Show the box
+                setTimeout(() => box.classList.add('show'), 10);
+
+                // Hide after 4 seconds
+                setTimeout(() => {
+                    box.classList.remove('show');
+                }, 4000);
+            },
+
+            hideMessage() {
+                document.getElementById('message-box').classList.remove('show');
+            },
+
+            async apiCall(endpoint, method = 'POST', data = null) {
+                this.setLoading(true);
+                this.hideMessage();
+                
+                try {
+                    const url = `${BASE_URL}${endpoint}`;
+                    const options = {
+                        method: method,
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        // CRITICAL: Must include credentials for the cookie to be sent/received
+                        credentials: 'include' 
+                    };
+
+                    if (data) {
+                        options.body = JSON.stringify(data);
+                    }
+
+                    const response = await fetch(url, options);
+                    const json = await response.json();
+
+                    this.setLoading(false);
+                    
+                    if (!json.success) {
+                        // Throw an error with the message from the backend
+                        throw new Error(json.message || 'API call failed');
+                    }
+
+                    return json;
+
+                } catch (error) {
+                    this.setLoading(false);
+                    
+                    // The generic error handler in apiCall() has already shown the message,
+                    // but we re-throw to be handled by specific functions (like checkAuth).
+                    throw error;
+                }
+            },
+            
+            // --- Authentication Check (Run on Init) ---
+            async checkAuth() {
+                // Check if the user is authenticated and fetch user data
+                try {
+                    // 1. isAuthenticated endpoint (checks for a valid token)
+                    await this.apiCall('/auth/is-auth', 'POST');
+
+                    // 2. If isAuthenticated succeeds, fetch user data
+                    const userDataResponse = await this.apiCall('/user/data', 'GET');
+                    
+                    this.authState.userData = userDataResponse.userData;
+                    this.authState.isLoggedIn = true;
+                    this.render('dashboard');
+                } catch (error) {
+                    // If either API call fails (token invalid, expired, not present, 
+                    // or user data fetch failed), we treat the user as logged out.
+                    
+                    this.authState.isLoggedIn = false;
+                    this.authState.userData = null;
+
+                    // We also suppress the error message for the EXPECTED "Unauthorized" failure 
+                    // when the app first loads with no cookie.
+                    const unauthorizedMessage = "Unauthorizd Login try again";
+
+                    // Only render the login view if we are NOT already on it 
+                    // and we weren't trying to render the dashboard before failure.
+                    const targetView = this.authState.currentView === 'dashboard' ? 'login' : this.authState.currentView;
+                    this.render(targetView);
+
+                    // Suppress the error message for the expected initial unauthorized check
+                    if(error.message === unauthorizedMessage && this.authState.currentView !== 'dashboard') {
+                        this.hideMessage();
+                    }
+                }
+            },
+
+            // --- Form Handlers ---
+
+            async handleRegister(event) {
+                event.preventDefault();
+                const data = {
+                    name: event.target.name.value,
+                    email: event.target.email.value,
+                    password: event.target.password.value,
+                };
+                
+                try {
+                    await this.apiCall('/auth/register', 'POST', data);
+                    await this.checkAuth();
+                    this.showMessage("Registration successful! You are now logged in.", true);
+                } catch (error) {
+                    this.showMessage(error.message);
+                }
+            },
+
+            async handleLogin(event) {
+                event.preventDefault();
+                const data = {
+                    email: event.target.email.value,
+                    password: event.target.password.value,
+                };
+
+                try {
+                    // 1. Log in. Cookie is set on the server.
+                    await this.apiCall('/auth/login', 'POST', data);
+
+                    // 2. Call checkAuth, which will now use the new cookie 
+                    //    to get user data and render the dashboard.
+                    await this.checkAuth(); 
+
+                    this.showMessage("Login successful!", true);
+                } catch (error) {
+                    this.showMessage(error.message);
+                }
+            },
+
+            async handleLogout() {
+                try {
+                    await this.apiCall('/auth/logout', 'POST');
+                    this.authState.isLoggedIn = false;
+                    this.authState.userData = null;
+                    this.showMessage("Logged out successfully!", true);
+                    this.render('login');
+                } catch (error) {
+                    // Even on error (e.g., server issue), we clear local state for UX
+                    this.authState.isLoggedIn = false;
+                    this.authState.userData = null;
+                    this.showMessage(error.message);
+                    this.render('login'); 
+                }
+            },
+
+            async handleSendVerifyOtp() {
+                try {
+                    // Need to send the userId to the server for authentication check 
+                    // which is done by userAuth middleware, but we don't pass anything 
+                    // explicitly as the middleware uses the cookie.
+                    await this.apiCall('/auth/send-verify-otp', 'POST', {}); 
+                    this.showMessage("Verification OTP sent to your email!", true);
+                    this.render('verify');
+                } catch (error) {
+                    this.showMessage(error.message);
+                }
+            },
+
+            async handleVerifyEmail(event) {
+                event.preventDefault();
+                const otp = event.target.otp.value;
+                try {
+                    // userId is added to the request body by the userAuth middleware
+                    await this.apiCall('/auth/verify-account', 'POST', { otp: otp });
+                    this.showMessage("Email successfully verified! Redirecting to dashboard...", true);
+                    // Rerun auth check to update dashboard status
+                    await this.checkAuth(); 
+                } catch (error) {
+                    this.showMessage(error.message);
+                }
+            },
+
+            async handleSendResetOtp(event) {
+                event.preventDefault();
+                const email = event.target.resetEmail.value;
+                try {
+                    const response = await this.apiCall('/auth/send-reset-otp', 'POST', { email });
+                    this.authState.tempEmail = email;
+                    this.showMessage(response.message, true); // Use server message "Otp sent..."
+                    this.render('reset-password');
+                } catch (error) {
+                    this.showMessage(error.message);
+                }
+            },
+
+            async handleResetPassword(event) {
+                event.preventDefault();
+                const otp = event.target.otp.value;
+                const newPass = event.target.newPassword.value;
+
+                try {
+                    const response = await this.apiCall('/auth/reset-password', 'POST', {
+                        email: this.authState.tempEmail,
+                        otp: otp,
+                        newPass: newPass
+                    });
+                    this.showMessage(response.message + " Please log in with your new password.", true);
+                    this.authState.tempEmail = null;
+                    this.render('login');
+                } catch (error) {
+                    this.showMessage(error.message);
+                }
+            },
+
+            // --- Rendering Functions ---
+
+            renderHeader(title) {
+                return `
+                    <h1 class="text-3xl font-bold text-primary-blue mb-2 text-center">${title}</h1>
+                    <p class="text-gray-500 mb-8 text-center">Glossera User Authentication</p>
+                `;
+            },
+
+            renderLoginForm() {
+                return `
+                    ${this.renderHeader('Login to your account')}
+                    <form onsubmit="App.handleLogin(event)">
+                        <div class="mb-4">
+                            <label for="login-email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                            <input type="email" id="login-email" name="email" required class="form-input w-full px-4 py-2 border rounded-lg focus:ring-primary-blue focus:border-primary-blue">
+                        </div>
+                        <div class="mb-6">
+                            <label for="login-password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                            <input type="password" id="login-password" name="password" required class="form-input w-full px-4 py-2 border rounded-lg focus:ring-primary-blue focus:border-primary-blue">
+                            <a href="#" onclick="App.render('forgot-password'); return false;" class="text-sm text-primary-blue hover:underline mt-2 block text-right">Forgot Password?</a>
+                        </div>
+                        <button type="submit" class="btn-primary w-full text-white py-2 rounded-lg font-semibold hover:opacity-90">Log In</button>
+                    </form>
+                    <div class="mt-6 text-center">
+                        <p class="text-sm text-gray-600">Don't have an account? <a href="#" onclick="App.render('register'); return false;" class="text-primary-blue font-medium hover:underline">Register here</a></p>
+                    </div>
+                `;
+            },
+
+            renderRegisterForm() {
+                return `
+                    ${this.renderHeader('Create a new account')}
+                    <form onsubmit="App.handleRegister(event)">
+                        <div class="mb-4">
+                            <label for="register-name" class="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                            <input type="text" id="register-name" name="name" required class="form-input w-full px-4 py-2 border rounded-lg focus:ring-primary-blue focus:border-primary-blue">
+                        </div>
+                        <div class="mb-4">
+                            <label for="register-email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                            <input type="email" id="register-email" name="email" required class="form-input w-full px-4 py-2 border rounded-lg focus:ring-primary-blue focus:border-primary-blue">
+                        </div>
+                        <div class="mb-6">
+                            <label for="register-password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                            <input type="password" id="register-password" name="password" required class="form-input w-full px-4 py-2 border rounded-lg focus:ring-primary-blue focus:border-primary-blue">
+                        </div>
+                        <button type="submit" class="btn-primary w-full text-white py-2 rounded-lg font-semibold hover:opacity-90">Register</button>
+                    </form>
+                    <div class="mt-6 text-center">
+                        <p class="text-sm text-gray-600">Already have an account? <a href="#" onclick="App.render('login'); return false;" class="text-primary-blue font-medium hover:underline">Log In</a></p>
+                    </div>
+                `;
+            },
+
+            renderDashboard() {
+                const userData = this.authState.userData;
+                const isVerified = userData.isAccountVerified;
+                
+                return `
+                    <div class="flex justify-between items-center mb-6 border-b pb-4">
+                        <h2 class="text-2xl font-bold text-primary-blue">Welcome, ${userData.name}!</h2>
+                        <button onclick="App.handleLogout()" class="bg-red-500 hover:bg-red-600 text-white text-sm py-1 px-3 rounded-lg font-medium transition duration-150">Logout</button>
+                    </div>
+                    
+                    <div class="bg-secondary-gray p-5 rounded-xl mb-6">
+                        <p class="text-lg font-semibold mb-2">Account Status</p>
+                        <div class="flex items-center">
+                            <span class="inline-block h-3 w-3 rounded-full mr-2 ${isVerified ? 'bg-green-500' : 'bg-red-500'}"></span>
+                            <span class="text-gray-700">${isVerified ? 'Verified' : 'Unverified'}</span>
+                        </div>
+                    </div>
+
+                    ${!isVerified ? `
+                        <div class="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 rounded-lg mb-6" role="alert">
+                            <p class="font-bold">Verification Required</p>
+                            <p>Please verify your email address to unlock all features.</p>
+                            <button onclick="App.handleSendVerifyOtp()" class="mt-3 text-sm font-semibold text-yellow-900 bg-yellow-300 hover:bg-yellow-400 py-1 px-3 rounded-lg transition duration-150">Send Verification Code</button>
+                        </div>
+                    ` : ''}
+
+                    <p class="text-sm text-gray-500 mt-4">You are securely logged in.</p>
+                `;
+            },
+
+            renderVerifyForm() {
+                const userData = this.authState.userData;
+                return `
+                    ${this.renderHeader('Verify Your Email')}
+                    <div class="mb-6 p-4 bg-blue-50 border-l-4 border-primary-blue text-gray-700 rounded-lg">
+                        <p class="text-sm">An OTP has been sent to your email. Please enter the 6-digit code below.</p>
+                        <p class="text-xs mt-1 font-mono">${userData ? userData.email : 'Your Email'}</p>
+                    </div>
+                    <form onsubmit="App.handleVerifyEmail(event)">
+                        <div class="mb-6">
+                            <label for="verify-otp" class="block text-sm font-medium text-gray-700 mb-1">Verification OTP</label>
+                            <input type="text" id="verify-otp" name="otp" required maxlength="6" pattern="[0-9]{6}" class="form-input w-full px-4 py-2 border rounded-lg text-center text-xl tracking-widest focus:ring-primary-blue focus:border-primary-blue" placeholder="______">
+                        </div>
+                        <button type="submit" class="btn-primary w-full text-white py-2 rounded-lg font-semibold hover:opacity-90">Verify Account</button>
+                    </form>
+                    <div class="mt-6 text-center">
+                        <a href="#" onclick="App.render('dashboard'); return false;" class="text-sm text-gray-500 hover:underline">Go to Dashboard</a>
+                    </div>
+                `;
+            },
+
+            renderForgotPasswordForm() {
+                return `
+                    ${this.renderHeader('Forgot Password')}
+                    <p class="text-gray-600 mb-6 text-center text-sm">Enter your account email and we'll send you a password reset OTP.</p>
+                    <form onsubmit="App.handleSendResetOtp(event)">
+                        <div class="mb-6">
+                            <label for="reset-email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                            <input type="email" id="reset-email" name="resetEmail" required class="form-input w-full px-4 py-2 border rounded-lg focus:ring-primary-blue focus:border-primary-blue">
+                        </div>
+                        <button type="submit" class="btn-primary w-full text-white py-2 rounded-lg font-semibold hover:opacity-90">Send Reset OTP</button>
+                    </form>
+                    <div class="mt-6 text-center">
+                        <a href="#" onclick="App.render('login'); return false;" class="text-sm text-primary-blue font-medium hover:underline">Back to Login</a>
+                    </div>
+                `;
+            },
+
+            renderResetPasswordForm() {
+                if (!this.authState.tempEmail) {
+                    return this.renderForgotPasswordForm();
+                }
+
+                return `
+                    ${this.renderHeader('Reset Password')}
+                    <div class="mb-6 p-4 bg-blue-50 border-l-4 border-primary-blue text-gray-700 rounded-lg">
+                        <p class="text-sm">OTP sent to: <span class="font-semibold">${this.authState.tempEmail}</span>. Enter the code and your new password.</p>
+                    </div>
+                    <form onsubmit="App.handleResetPassword(event)">
+                        <div class="mb-4">
+                            <label for="reset-otp" class="block text-sm font-medium text-gray-700 mb-1">Reset OTP</label>
+                            <input type="text" id="reset-otp" name="otp" required maxlength="6" pattern="[0-9]{6}" class="form-input w-full px-4 py-2 border rounded-lg text-center text-xl tracking-widest focus:ring-primary-blue focus:border-primary-blue" placeholder="______">
+                        </div>
+                        <div class="mb-6">
+                            <label for="new-password" class="block text-sm font-medium text-gray-700 mb-1">New Password</label>
+                            <input type="password" id="new-password" name="newPassword" required class="form-input w-full px-4 py-2 border rounded-lg focus:ring-primary-blue focus:border-primary-blue">
+                        </div>
+                        <button type="submit" class="btn-primary w-full text-white py-2 rounded-lg font-semibold hover:opacity-90">Reset Password</button>
+                    </form>
+                    <div class="mt-6 text-center">
+                        <a href="#" onclick="App.render('login'); return false;" class="text-sm text-primary-blue font-medium hover:underline">Back to Login</a>
+                    </div>
+                `;
+            },
+
+            render(view) {
+                const container = document.getElementById('app-container');
+                this.authState.currentView = view;
+                
+                switch (view) {
+                    case 'login':
+                        container.innerHTML = this.renderLoginForm();
+                        break;
+                    case 'register':
+                        container.innerHTML = this.renderRegisterForm();
+                        break;
+                    case 'dashboard':
+                        container.innerHTML = this.renderDashboard();
+                        break;
+                    case 'verify':
+                        container.innerHTML = this.renderVerifyForm();
+                        break;
+                    case 'forgot-password':
+                        container.innerHTML = this.renderForgotPasswordForm();
+                        break;
+                    case 'reset-password':
+                        container.innerHTML = this.renderResetPasswordForm();
+                        break;
+                    default:
+                        container.innerHTML = this.renderLoginForm();
+                }
+            },
+
+            init() {
+                // Determine which view to render initially based on auth state
+                this.checkAuth();
+            }
+        };
+
+        // Initialize the application once the window is fully loaded
+        window.onload = () => {
+            App.init();
+        };
+    </script>
+</body>
+</html>
